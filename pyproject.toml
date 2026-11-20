@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "machina-cad-deid"
+version = "0.1.0"
+description = "Resumable, bounded-workspace de-identification for the Machina CAD challenge"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PyMuPDF>=1.24,<2",
+  "Pillow>=10,<13",
+]
+
+[project.optional-dependencies]
+ocr = ["pytesseract>=0.3.10,<1"]
+dev = ["pytest>=8,<9", "ruff>=0.8,<1"]
+
+[project.scripts]
+machina-deid = "machina_deid.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
