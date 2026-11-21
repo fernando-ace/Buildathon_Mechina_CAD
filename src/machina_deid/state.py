@@ -66,6 +66,11 @@ class RunState:
                 "\n".join(notes),
             ),
         )
+        if status in {"staged", "complete_local", "uploaded"}:
+            self.db.execute(
+                "DELETE FROM issues WHERE attempt=? AND output_path=? AND code='input_unavailable'",
+                (attempt, output_path),
+            )
         self.db.commit()
 
     def record_issue(self, attempt: int, output_path: str, code: str, detail: str) -> None:

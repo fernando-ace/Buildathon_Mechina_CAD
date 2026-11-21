@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
-import urllib.parse
 from pathlib import Path
 
 INPUT_BASE = "https://machina-input.joinbuilders.org"
@@ -54,7 +53,10 @@ def download_entry(
         raise RuntimeError("curl is required to fetch corpus objects")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
-    url = base_url.rstrip("/") + "/" + urllib.parse.quote(url_path, safe="/")
+    # The official manifest's URL-path column is already percent-encoded.
+    # Keep it byte-for-byte, as get-input.sh does; quoting it again breaks
+    # paths containing escapes and returns 404 for valid mirror objects.
+    url = base_url.rstrip("/") + "/" + url_path
     temporary.unlink(missing_ok=True)
     completed = subprocess.run(
         [
