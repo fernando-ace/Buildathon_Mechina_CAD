@@ -190,7 +190,21 @@ class IdentityLedger:
     def replace_known_aliases(self, text: str) -> str:
         if not text or not self._alias_map:
             return text
-        if self._alias_automaton is None or not text.isascii():
+        if self._alias_automaton is None:
+            pattern = self._full_alias_pattern()
+            return (
+                pattern.sub(
+                    lambda match: self._alias_map.get(match.group(0).casefold(), match.group(0)),
+                    text,
+                )
+                if pattern
+                else text
+            )
+
+        folded = text.casefold()
+        if len(folded) != len(text):
+            # Full case folding can expand a small set of Unicode characters. Keep the
+            # existing regex semantics for those rare strings so match offsets stay exact.
             pattern = self._full_alias_pattern()
             return (
                 pattern.sub(
@@ -206,7 +220,6 @@ class IdentityLedger:
         # are kept in a small regex until the next bounded automaton rebuild.
         if len(self._pending_aliases) >= _ALIAS_BATCH_SIZE:
             self._compile_aliases()
-        folded = text.lower()
         best_by_start: dict[int, tuple[int, str]] = {}
         starts: list[int] = []
         output: list[str] = []
