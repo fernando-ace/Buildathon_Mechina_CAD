@@ -192,7 +192,7 @@ def _process_text(
     suffix = PurePosixPath(logical_name).suffix.lower()
     if suffix in {".step", ".stp", ".p21"}:
         text = _redact_step(text, context, references)
-        text = context.reference_rewrite(text, references)
+        text = _rewrite_step_references(text, context, references)
         return text.encode(encoding, errors="replace")
     if suffix in {".xml", ".rels"}:
         note_count = len(context.notes)
@@ -375,6 +375,17 @@ def _redact_step(text: str, context: HandlerContext, references: ReferenceMap | 
         return f"{match.group(1)}({body});"
 
     return entity_re.sub(edit_entity, text)
+
+
+def _rewrite_step_references(
+    text: str, context: HandlerContext, references: ReferenceMap | None
+) -> str:
+    """Rewrite linked filenames in STEP string literals without scanning numeric geometry."""
+
+    return STEP_STRING.sub(
+        lambda match: context.reference_rewrite(match.group(0), references),
+        text,
+    )
 
 
 def _is_unsupported_binary(name: str, data: bytes) -> bool:
@@ -870,7 +881,7 @@ def _transform_text_chunk(
 ) -> str:
     if PurePosixPath(logical_name).suffix.lower() in {".step", ".stp", ".p21"}:
         text = _redact_step(text, context, references)
-        return context.reference_rewrite(text, references)
+        return _rewrite_step_references(text, context, references)
     return context.reference_rewrite(context.redactor.redact(text), references)
 
 
