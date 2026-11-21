@@ -697,6 +697,7 @@ def _process_pdf(
         notes.append("pdf_large_document_ocr_reduced_dpi")
     for page in doc:
         textpage = None
+        page_has_redactions = False
         native_text = page.get_text("text")
         has_images = bool(page.get_images(full=True))
         needs_ocr = has_images or len(native_text.strip()) < 80
@@ -730,6 +731,7 @@ def _process_pdf(
                                 fill=(1, 1, 1),
                                 text_color=(0, 0, 0),
                             )
+                            page_has_redactions = True
         except (RuntimeError, ValueError, TypeError, KeyError):
             notes.append("pdf_page_text_not_fully_processed")
         try:
@@ -757,10 +759,11 @@ def _process_pdf(
                     annot.update()
         except (RuntimeError, ValueError, TypeError, AttributeError):
             notes.append("pdf_annotations_not_fully_processed")
-        try:
-            page.apply_redactions(images=2, graphics=1, text=0)
-        except TypeError:
-            page.apply_redactions()
+        if page_has_redactions:
+            try:
+                page.apply_redactions(images=2, graphics=1, text=0)
+            except TypeError:
+                page.apply_redactions()
 
     embedded_xrefs: list[int] = []
     try:
