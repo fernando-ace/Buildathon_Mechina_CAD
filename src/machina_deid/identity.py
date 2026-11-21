@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
 import hmac
 import os
 import re
 import sqlite3
 import unicodedata
 from collections.abc import Mapping
+from itertools import groupby
 from pathlib import Path
 
 try:
@@ -72,6 +74,7 @@ class IdentityLedger:
         self._alias_automaton = None
         self._alias_pattern: re.Pattern[str] | None = None
         self._full_pattern_dirty = True
+        self._max_alias_length = 0
         self._compile_aliases()
 
     def pseudonym(self, kind: str, value: str) -> str:
@@ -107,6 +110,7 @@ class IdentityLedger:
                 if ahocorasick is None or not is_new_value:
                     return
                 self._pending_aliases[normalized] = pseudonym
+                self._max_alias_length = max(self._max_alias_length, len(normalized))
                 self._pending_automaton = None
                 if len(self._pending_aliases) >= _ALIAS_BATCH_SIZE:
                     self._compile_aliases()
@@ -140,6 +144,9 @@ class IdentityLedger:
             if len(value) >= 3:
                 automaton.add_word(value, (value, pseudonym))
                 added = True
+        self._max_alias_length = max(
+            (len(value) for value in self._alias_map if len(value) >= 3), default=0
+        )
         if added:
             automaton.make_automaton()
             self._alias_automaton = automaton
@@ -200,7 +207,10 @@ class IdentityLedger:
         if len(self._pending_aliases) >= _ALIAS_BATCH_SIZE:
             self._compile_aliases()
         folded = text.lower()
-        matches: list[tuple[int, int, str]] = []
+        best_by_start: dict[int, tuple[int, str]] = {}
+        starts: list[int] = []
+        output: list[str] = []
+        cursor = 0
 
         def add_match(start: int, end: int, pseudonym: str) -> None:
             before = text[start - 1] if start else ""
@@ -209,28 +219,41 @@ class IdentityLedger:
                 after and (after.isalnum() or after == "_")
             ):
                 return
-            matches.append((start, end, pseudonym))
+            prior = best_by_start.get(start)
+            if prior is None:
+                best_by_start[start] = (end, pseudonym)
+                heapq.heappush(starts, start)
+            elif end > prior[0]:
+                best_by_start[start] = (end, pseudonym)
 
+        def flush_through(last_start: int | None) -> None:
+            nonlocal cursor
+            while starts and (last_start is None or starts[0] <= last_start):
+                start = heapq.heappop(starts)
+                end, pseudonym = best_by_start.pop(start)
+                if start < cursor:
+                    continue
+                output.extend((text[cursor:start], pseudonym))
+                cursor = end
+
+        iterators = []
         if self._alias_automaton is not None:
-            for end_index, (alias, fallback) in self._alias_automaton.iter(folded):
-                start = end_index - len(alias) + 1
-                add_match(start, end_index + 1, self._alias_map.get(alias, fallback))
+            iterators.append(self._alias_automaton.iter(folded))
         pending = self._pending_alias_automaton()
         if pending is not None:
-            for end_index, (alias, fallback) in pending.iter(folded):
-                start = end_index - len(alias) + 1
-                add_match(start, end_index + 1, self._alias_map.get(alias, fallback))
-        if not matches:
+            iterators.append(pending.iter(folded))
+        if not iterators:
             return text
 
-        matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
-        output: list[str] = []
-        cursor = 0
-        for start, end, pseudonym in matches:
-            if start < cursor:
-                continue
-            output.extend((text[cursor:start], pseudonym))
-            cursor = end
+        events = heapq.merge(*iterators)
+        for end_index, same_end in groupby(events, key=lambda item: item[0]):
+            for _, (alias, fallback) in same_end:
+                start = end_index - len(alias) + 1
+                add_match(start, end_index + 1, self._alias_map.get(alias, fallback))
+            flush_through(end_index - self._max_alias_length + 1)
+        flush_through(None)
+        if not output:
+            return text
         output.append(text[cursor:])
         return "".join(output)
 
