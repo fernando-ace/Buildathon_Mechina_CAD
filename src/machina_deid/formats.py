@@ -411,7 +411,7 @@ def _process_zip(data: bytes, context: HandlerContext) -> tuple[bytes, list[str]
             info.filename: _pseudo_member_name(info.filename, context) for info in zin.infolist()
         }
         references = {old: new for old, new in names.items() if old != new}
-        with zipfile.ZipFile(destination, "w") as zout:
+        with zipfile.ZipFile(destination, "w", compresslevel=1) as zout:
             zout.comment = context.redactor.redact(zin.comment.decode("utf-8", "replace")).encode(
                 "utf-8"
             )[:65535]
