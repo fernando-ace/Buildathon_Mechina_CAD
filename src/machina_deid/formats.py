@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import copy
 import gzip
+import html
 import io
 import os
 import re
@@ -88,6 +89,16 @@ MAX_TEXT_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_BYTES = 1024 * 1024 * 1024
 MAX_ARCHIVE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 STEP_STRING = re.compile(r"'(?:[^']|'')*'")
+MODEL_TAG = re.compile(rb"(?is)<(?P<tag>object|component|base)\b[^>]*>")
+MODEL_ATTRIBUTE = re.compile(
+    rb"(?is)(?P<prefix>\b(?:name|path|filename|source|author|creator|designer|engineer|"
+    rb"manufacturer|supplier|customer|title|email|phone|address|location|company|project)\s*=\s*)"
+    rb"(?P<quote>['\"])(?P<value>.*?)(?P=quote)"
+)
+MODEL_METADATA = re.compile(
+    rb"(?is)(?P<open><metadata\b[^>]*>)(?P<value>.*?)(?P<close></metadata\s*>)"
+)
+MODEL_METADATA_NAME = re.compile(rb"(?is)\bname\s*=\s*(['\"])(.*?)\1")
 
 
 class UnsafeArchive(ValueError):
@@ -202,6 +213,64 @@ def _process_text(
     text = context.redactor.redact(text)
     text = context.reference_rewrite(text, references)
     return text.encode(encoding, errors="replace")
+
+
+def _redact_3mf_model(
+    data: bytes, context: HandlerContext, references: ReferenceMap | None
+) -> bytes:
+    """Redact 3MF identity fields without scanning numeric mesh geometry."""
+
+    text = data
+
+    def rewrite_tag(match: re.Match[bytes]) -> bytes:
+        tag = match.group("tag").decode("ascii").casefold()
+
+        def rewrite_attribute(attribute: re.Match[bytes]) -> bytes:
+            raw_name = attribute.group("prefix").split(b"=", 1)[0].strip().decode("ascii")
+            name = raw_name.casefold()
+            quote = attribute.group("quote")
+            value = html.unescape(attribute.group("value").decode("utf-8"))
+            if name == "name" and tag in {"object", "component", "base"}:
+                cleaned = context.ledger.pseudonym("part", value)
+            elif name in {"path", "filename", "source"}:
+                cleaned = context.reference_rewrite(context.redactor.redact(value), references)
+            else:
+                identity = _xml_kind(name)
+                if identity is None:
+                    return attribute.group(0)
+                cleaned = _xml_identity_value(value, identity[1], context)
+            return (
+                attribute.group("prefix")
+                + quote
+                + html.escape(cleaned, quote=False).encode("utf-8")
+                + quote
+            )
+
+        return MODEL_ATTRIBUTE.sub(rewrite_attribute, match.group(0))
+
+    text = MODEL_TAG.sub(rewrite_tag, text)
+
+    def rewrite_metadata(match: re.Match[bytes]) -> bytes:
+        opening = match.group("open")
+        name_match = MODEL_METADATA_NAME.search(opening)
+        value = html.unescape(match.group("value").decode("utf-8"))
+        if name_match:
+            name = html.unescape(name_match.group(2).decode("utf-8"))
+        else:
+            name = ""
+        identity = _xml_kind(name)
+        if identity is not None:
+            cleaned = _xml_identity_value(value, identity[1], context)
+        else:
+            cleaned = context.reference_rewrite(context.redactor.redact(value), references)
+        return (
+            opening
+            + html.escape(cleaned, quote=False).encode("utf-8")
+            + match.group("close")
+        )
+
+    text = MODEL_METADATA.sub(rewrite_metadata, text)
+    return text
 
 
 def _xml_kind(tag: str) -> tuple[str, str] | None:
@@ -755,6 +824,8 @@ def _process_bytes(
             return _process_zip(data, context)
         if data.startswith(b"%PDF-") or ext == ".pdf":
             return _process_pdf(data, context, references)
+        if ext == ".model" and data.lstrip().startswith(b"<?xml"):
+            return _redact_3mf_model(data, context, references), []
         if ext in IMAGE_EXTENSIONS:
             return _process_image(data, context)
         if ext == ".stl":
