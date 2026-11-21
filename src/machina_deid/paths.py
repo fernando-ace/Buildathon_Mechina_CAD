@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import PurePosixPath
@@ -83,10 +82,24 @@ NEUTRAL_NAMES = {
     "thumbnail",
     "thumbnail1",
 }
-_REFERENCE_TOKEN = re.compile(
-    r"(?P<quoted>['\"])(?P<value>(?:[^'\"/\\\r\n]{1,255}[/\\])*[^'\"/\\\r\n]{1,255}\.[A-Za-z][A-Za-z0-9]{0,11})(?P=quoted)|"
-    r"(?<![\w])(?P<token>(?:[^\s\"'<>()[\],;:=]+/)*[^\s\"'<>()[\],;:=]+\.[A-Za-z][A-Za-z0-9]{0,11})(?![\w])"
+_REFERENCE_DELIMITERS = frozenset(
+    ("\"", "'", "<", ">", "(", ")", "[", "]", ",", ";", ":", "=")
 )
+
+
+def _has_file_extension(value: str) -> bool:
+    if "." not in value:
+        return False
+    filename = value.replace("\\", "/").rsplit("/", 1)[-1]
+    extension = filename.rpartition(".")[2]
+    return bool(
+        extension
+        and len(extension) <= 12
+        and extension[0].isascii()
+        and extension[0].isalpha()
+        and extension.isascii()
+        and extension.isalnum()
+    )
 
 
 def rewrite_reference_text(
@@ -119,15 +132,44 @@ def rewrite_reference_text(
         mapped.append(filename)
         return PurePosixPath(*mapped).as_posix()
 
-    def replace(match: re.Match[str]) -> str:
-        quoted = match.group("quoted")
-        value = match.group("value") if quoted else match.group("token")
-        replacement = lookup(value)
-        if replacement is None:
-            return match.group(0)
-        return f"{quoted}{replacement}{quoted}" if quoted else replacement
-
-    return _REFERENCE_TOKEN.sub(replace, text)
+    replacements: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in "\"'":
+            closing = text.find(char, index + 1)
+            if closing >= 0:
+                value = text[index + 1 : closing]
+                if _has_file_extension(value):
+                    replacement = lookup(value)
+                    if replacement is not None:
+                        replacements.append((index + 1, closing, replacement))
+                        index = closing + 1
+                        continue
+        if char.isspace() or char in _REFERENCE_DELIMITERS:
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and not (
+            text[end].isspace() or text[end] in _REFERENCE_DELIMITERS
+        ):
+            end += 1
+        value = text[index:end]
+        if _has_file_extension(value):
+            replacement = lookup(value)
+            if replacement is not None:
+                replacements.append((index, end, replacement))
+        index = end
+    if not replacements:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for start, end, replacement in replacements:
+        parts.append(text[cursor:start])
+        parts.append(replacement)
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 class PathMapper:
