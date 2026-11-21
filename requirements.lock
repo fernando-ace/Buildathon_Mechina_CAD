@@ -12,6 +12,8 @@ pillow==12.3.0
     #   pytesseract
 pluggy==1.7.0
     # via pytest
+pyahocorasick==2.3.1
+    # via machina-cad-deid (pyproject.toml)
 pygments==2.21.0
     # via pytest
 pymupdf==1.28.2

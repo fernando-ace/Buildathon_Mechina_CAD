@@ -7,7 +7,15 @@ import os
 import re
 import sqlite3
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
+
+try:
+    import ahocorasick
+except ImportError:  # pragma: no cover - exercised only by dependency-light installs.
+    ahocorasick = None
+
+_ALIAS_BATCH_SIZE = 512
 
 _LABELS = {
     "person": "Person",
@@ -54,6 +62,11 @@ class IdentityLedger:
             str(normalized): str(pseudonym)
             for normalized, pseudonym in self.db.execute("SELECT normalized,pseudonym FROM aliases")
         }
+        self._pending_aliases: dict[str, str] = {}
+        self._pending_pattern: re.Pattern[str] | None = None
+        self._alias_automaton = None
+        self._alias_pattern: re.Pattern[str] | None = None
+        self._full_pattern_dirty = True
         self._compile_aliases()
 
     def pseudonym(self, kind: str, value: str) -> str:
@@ -86,27 +99,112 @@ class IdentityLedger:
             self.db.commit()
             if cursor.rowcount:
                 self._alias_map[normalized] = pseudonym
-                self._compile_aliases()
+                self._full_pattern_dirty = True
+                if ahocorasick is None:
+                    return
+                self._pending_aliases[normalized] = pseudonym
+                self._pending_pattern = None
+                if len(self._pending_aliases) >= _ALIAS_BATCH_SIZE:
+                    self._compile_aliases()
 
     def _compile_aliases(self) -> None:
-        values = sorted(
-            (value for value in self._alias_map if len(value) >= 3), key=len, reverse=True
-        )
-        self._alias_values = {value.casefold(): self._alias_map[value] for value in values}
-        self._alias_pattern = (
+        if ahocorasick is None:
+            self._alias_automaton = None
+            self._pending_aliases.clear()
+            self._pending_pattern = None
+            return
+        automaton = ahocorasick.Automaton()
+        added = False
+        for value, pseudonym in self._alias_map.items():
+            if len(value) >= 3:
+                automaton.add_word(value, (value, pseudonym))
+                added = True
+        if added:
+            automaton.make_automaton()
+            self._alias_automaton = automaton
+        else:
+            self._alias_automaton = None
+        self._pending_aliases.clear()
+        self._pending_pattern = None
+        self._alias_pattern = None
+        self._full_pattern_dirty = True
+
+    def _compile_pattern(self, aliases: Mapping[str, str]) -> re.Pattern[str] | None:
+        values = sorted((value for value in aliases if len(value) >= 3), key=len, reverse=True)
+        return (
             re.compile(
-                r"(?<!\w)(?:" + "|".join(re.escape(v) for v in values) + r")(?!\w)", re.IGNORECASE
+                r"(?<!\w)(?:" + "|".join(re.escape(value) for value in values) + r")(?!\w)",
+                re.IGNORECASE,
             )
             if values
             else None
         )
 
+    def _full_alias_pattern(self) -> re.Pattern[str] | None:
+        if self._full_pattern_dirty:
+            self._alias_pattern = self._compile_pattern(self._alias_map)
+            self._full_pattern_dirty = False
+        return self._alias_pattern
+
+    def _pending_alias_pattern(self) -> re.Pattern[str] | None:
+        if self._pending_pattern is None and self._pending_aliases:
+            self._pending_pattern = self._compile_pattern(self._pending_aliases)
+        return self._pending_pattern
+
     def replace_known_aliases(self, text: str) -> str:
-        if self._alias_pattern is None:
+        if not text or not self._alias_map:
             return text
-        return self._alias_pattern.sub(
-            lambda match: self._alias_values.get(match.group(0).casefold(), match.group(0)), text
-        )
+        if self._alias_automaton is None or not text.isascii():
+            pattern = self._full_alias_pattern()
+            return (
+                pattern.sub(
+                    lambda match: self._alias_map.get(match.group(0).casefold(), match.group(0)),
+                    text,
+                )
+                if pattern
+                else text
+            )
+
+        # Python's regex engine slows down as the alias alternation grows. The Aho-Corasick
+        # automaton scans large CAD XML and text payloads in one pass. Newly discovered aliases
+        # are kept in a small regex until the next bounded automaton rebuild.
+        if len(self._pending_aliases) >= _ALIAS_BATCH_SIZE:
+            self._compile_aliases()
+        folded = text.lower()
+        matches: list[tuple[int, int, str]] = []
+
+        def add_match(start: int, end: int, pseudonym: str) -> None:
+            before = text[start - 1] if start else ""
+            after = text[end] if end < len(text) else ""
+            if (before and (before.isalnum() or before == "_")) or (
+                after and (after.isalnum() or after == "_")
+            ):
+                return
+            matches.append((start, end, pseudonym))
+
+        if self._alias_automaton is not None:
+            for end_index, (alias, pseudonym) in self._alias_automaton.iter(folded):
+                start = end_index - len(alias) + 1
+                add_match(start, end_index + 1, pseudonym)
+        pending = self._pending_alias_pattern()
+        if pending is not None:
+            for match in pending.finditer(text):
+                pseudonym = self._pending_aliases.get(match.group(0).casefold())
+                if pseudonym is not None:
+                    add_match(match.start(), match.end(), pseudonym)
+        if not matches:
+            return text
+
+        matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+        output: list[str] = []
+        cursor = 0
+        for start, end, pseudonym in matches:
+            if start < cursor:
+                continue
+            output.extend((text[cursor:start], pseudonym))
+            cursor = end
+        output.append(text[cursor:])
+        return "".join(output)
 
     def known_aliases(self) -> list[tuple[str, str]]:
         return [
