@@ -113,6 +113,9 @@ def _write_readme(
             "  OCR requires Tesseract. Unsupported proprietary CAD binaries are preserved intact and",
             "  reported; their internal identifying properties may remain. Review these exceptions.",
             "  Geometry values and non-identifying engineering data are not intentionally rewritten.",
+            "  There is no dedicated logo detector, so identifying marks inside raster artwork or",
+            "  unsupported embedded previews may remain. PDF attachment streams or names that could",
+            "  not be safely updated are reported per file.",
             "",
             "No credentials, raw input, private identity mappings, or temporary files are included.",
         ]

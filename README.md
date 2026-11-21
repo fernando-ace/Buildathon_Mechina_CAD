@@ -90,5 +90,8 @@ The implementation favors content-preserving edits for text-based CAD and
 document formats, ZIP-family packages, PDFs, and OCR-capable raster images.
 Native proprietary CAD binaries are not rewritten unless a safe parser is
 available. This avoids corrupting geometry but leaves known coverage gaps that
-must be reviewed in the generated `README.txt`.
+must be reviewed in the generated `README.txt`. There is no dedicated logo
+detector, so identifying marks in raster artwork or unsupported embedded
+previews may remain. PDF attachments that cannot be safely updated are reported
+per file.
 
