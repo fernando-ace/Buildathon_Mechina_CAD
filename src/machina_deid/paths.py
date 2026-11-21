@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import PurePosixPath
@@ -82,9 +83,7 @@ NEUTRAL_NAMES = {
     "thumbnail",
     "thumbnail1",
 }
-_REFERENCE_DELIMITERS = frozenset(
-    ("\"", "'", "<", ">", "(", ")", "[", "]", ",", ";", ":", "=")
-)
+_REFERENCE_TOKEN_START = re.compile(r"[^\s\"'<>()[\],;:=]+")
 
 
 def _has_file_extension(value: str) -> bool:
@@ -135,30 +134,25 @@ def rewrite_reference_text(
     replacements: list[tuple[int, int, str]] = []
     index = 0
     while index < len(text):
-        char = text[index]
-        if char in "\"'":
-            closing = text.find(char, index + 1)
+        if text[index] in "\"'":
+            closing = text.find(text[index], index + 1)
             if closing >= 0:
                 value = text[index + 1 : closing]
                 if _has_file_extension(value):
                     replacement = lookup(value)
                     if replacement is not None:
                         replacements.append((index + 1, closing, replacement))
-                        index = closing + 1
-                        continue
-        if char.isspace() or char in _REFERENCE_DELIMITERS:
-            index += 1
-            continue
-        end = index + 1
-        while end < len(text) and not (
-            text[end].isspace() or text[end] in _REFERENCE_DELIMITERS
-        ):
-            end += 1
-        value = text[index:end]
+                index = closing + 1
+                continue
+        match = _REFERENCE_TOKEN_START.search(text, index)
+        if match is None:
+            break
+        start, end = match.span()
+        value = match.group()
         if _has_file_extension(value):
             replacement = lookup(value)
             if replacement is not None:
-                replacements.append((index, end, replacement))
+                replacements.append((start, end, replacement))
         index = end
     if not replacements:
         return text
