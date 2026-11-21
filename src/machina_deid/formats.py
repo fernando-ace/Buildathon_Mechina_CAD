@@ -53,6 +53,24 @@ TEXT_EXTENSIONS = {
     ".prj",
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+PRECOMPRESSED_EXTENSIONS = {
+    ".3mf",
+    ".bmp",
+    ".docx",
+    ".fcstd",
+    ".gz",
+    ".jpeg",
+    ".jpg",
+    ".kmz",
+    ".pdf",
+    ".png",
+    ".pptx",
+    ".tif",
+    ".tiff",
+    ".webp",
+    ".xlsx",
+    ".zip",
+}
 ARCHIVE_EXTENSIONS = {".zip", ".fcstd", ".3mf", ".docx", ".xlsx", ".pptx", ".kmz"}
 BINARY_CAD = {
     ".sldprt",
@@ -177,7 +195,10 @@ def _process_text(
         text = context.reference_rewrite(text, references)
         return text.encode(encoding, errors="replace")
     if suffix in {".xml", ".rels"}:
+        note_count = len(context.notes)
         text = _redact_xml(text, context, references)
+        if len(context.notes) == note_count:
+            return text.encode(encoding, errors="replace")
     text = context.redactor.redact(text)
     text = context.reference_rewrite(text, references)
     return text.encode(encoding, errors="replace")
@@ -387,6 +408,8 @@ def _process_zip(data: bytes, context: HandlerContext) -> tuple[bytes, list[str]
                 new_info = copy.copy(info)
                 new_info.filename = names[info.filename]
                 new_info.orig_filename = new_info.filename
+                if PurePosixPath(info.filename).suffix.lower() in PRECOMPRESSED_EXTENSIONS:
+                    new_info.compress_type = zipfile.ZIP_STORED
                 new_info.extra = (
                     b""  # Remove raw Unicode path/comment metadata; ZIP64 is regenerated if needed.
                 )
@@ -722,6 +745,8 @@ def _process_bytes(
             binary_header = _binary_stl_header(data)
             if binary_header is not None:
                 header, notes = _redact_binary_stl_header(binary_header, context)
+                if header == binary_header:
+                    return data, notes
                 return header + data[80:], notes
             return _redact_ascii_stl(data, context), []
         if ext in TEXT_EXTENSIONS:

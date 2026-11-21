@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import PurePosixPath
 
 from .identity import IdentityLedger
@@ -97,6 +98,7 @@ def rewrite_reference_text(
 
     component_map = component_map or {}
 
+    @lru_cache(maxsize=8192)
     def lookup(value: str) -> str | None:
         direct = file_map.get(value)
         if direct is not None:
