@@ -12,9 +12,10 @@ class RunState:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, timeout=120)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute("PRAGMA busy_timeout=120000")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS files (attempt INTEGER, source_path TEXT, output_path TEXT, "
             "status TEXT, input_sha256 TEXT, output_sha256 TEXT, notes TEXT DEFAULT '', "

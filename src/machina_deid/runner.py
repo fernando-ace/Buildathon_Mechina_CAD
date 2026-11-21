@@ -150,6 +150,8 @@ def run_pipeline(
     retry_omitted: bool,
     refresh_manifest: bool,
     workers: int,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> int:
     if attempt < 1:
         raise ValueError("Attempt numbers start at 1")
@@ -157,6 +159,8 @@ def run_pipeline(
         raise ValueError("Require 0 < batch size <= scratch limit")
     if max_files is not None and max_files < 1:
         raise ValueError("--max-files must be positive")
+    if shard_count < 1 or not 0 <= shard_index < shard_count:
+        raise ValueError("Require 0 <= --shard-index < --shard-count and --shard-count >= 1")
     if max_files is not None and dest:
         raise ValueError("A bounded sample is not a complete scored corpus; do not upload it")
     if max_files is None and not dest:
@@ -177,10 +181,17 @@ def run_pipeline(
     raw_dir.mkdir(parents=True, exist_ok=True)
     entries = _manifest_entries(work_dir, refresh_manifest)
     sample = stratified_sample(entries, max_files or 0)
-    print(f"Manifest: {len(entries):,} files; selected: {len(sample):,}.", flush=True)
+    if shard_count > 1:
+        sample = sample[shard_index::shard_count]
+    print(
+        f"Manifest: {len(entries):,} files; selected: {len(sample):,} "
+        f"(shard {shard_index + 1}/{shard_count}).",
+        flush=True,
+    )
 
     state = RunState(work_dir / "run.sqlite3")
-    identity_db = sqlite3.connect(work_dir / "run.sqlite3")
+    identity_db = sqlite3.connect(work_dir / "run.sqlite3", timeout=120)
+    identity_db.execute("PRAGMA busy_timeout=120000")
     ledger = IdentityLedger(identity_db, work_dir / "pseudonym.key")
     path_map = PathMapper(ledger, entries)
     redactor = TextRedactor(ledger)
@@ -340,22 +351,28 @@ def run_pipeline(
             flush_batch()
             status_counts = state.counts(attempt)
             pending = status_counts.get("failed", 0) + status_counts.get("staged", 0)
-            if pending:
+            if pending and shard_count == 1:
                 print(
                     f"Attempt is incomplete: {pending:,} files failed or remain staged; code was not packaged.",
                     file=sys.stderr,
                 )
                 return 2
-            issues = state.issue_rows(attempt)
-            readme = work_dir / f"README-attempt-{attempt}.txt"
-            _write_readme(readme, attempt, status_counts, issues)
-            root = Path(__file__).resolve().parents[2]
-            source_items = _source_files(root)
-            source_items.append((readme, "README.txt"))
-            byte_count = uploader.upload_many(source_items)
-            print(f"Uploaded source and README ({byte_count / 1e6:.1f} MB).", flush=True)
-            print(f"Complete attempt folder: {dest}")
-            print("Review the folder, then submit it on the official track page.")
+            if shard_count == 1:
+                issues = state.issue_rows(attempt)
+                readme = work_dir / f"README-attempt-{attempt}.txt"
+                _write_readme(readme, attempt, status_counts, issues)
+                root = Path(__file__).resolve().parents[2]
+                source_items = _source_files(root)
+                source_items.append((readme, "README.txt"))
+                byte_count = uploader.upload_many(source_items)
+                print(f"Uploaded source and README ({byte_count / 1e6:.1f} MB).", flush=True)
+                print(f"Complete attempt folder: {dest}")
+                print("Review the folder, then submit it on the official track page.")
+            else:
+                print(
+                    f"Shard {shard_index + 1}/{shard_count} finished; run a single-shard "
+                    "final pass after all workers exit to validate completeness and package code."
+                )
         elif max_files is None:
             print(
                 "Local output has no remote destination; stop and use a bounded sample or configure upload."

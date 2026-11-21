@@ -38,6 +38,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry-omitted", action="store_true", help="Retry files previously recorded as omitted"
     )
     run.add_argument("--refresh-manifest", action="store_true", help="Download a fresh manifest")
+    run.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Zero-based manifest shard for parallel runs (use with --shard-count)",
+    )
+    run.add_argument(
+        "--shard-count",
+        type=int,
+        default=1,
+        help="Number of disjoint manifest shards; all workers share the checkpoint directory",
+    )
     return parser
 
 
@@ -58,6 +70,8 @@ def main() -> None:
             retry_omitted=args.retry_omitted,
             refresh_manifest=args.refresh_manifest,
             workers=args.workers,
+            shard_index=args.shard_index,
+            shard_count=args.shard_count,
         )
         raise SystemExit(code)
 
