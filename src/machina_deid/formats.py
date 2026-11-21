@@ -623,11 +623,16 @@ def _process_pdf(
         notes.append("pdf_xmp_metadata_not_updated")
 
     tesseract_available = context.has_tesseract()
+    ocr_dpi = 150 if len(data) >= 64 * 1024**2 or doc.page_count > 50 else 200
+    if ocr_dpi < 200:
+        notes.append("pdf_large_document_ocr_reduced_dpi")
     for page in doc:
         textpage = None
         if tesseract_available:
             try:
-                textpage = page.get_textpage_ocr(flags=0, language="eng", dpi=200, full=False)
+                textpage = page.get_textpage_ocr(
+                    flags=0, language="eng", dpi=ocr_dpi, full=False
+                )
             except (OSError, RuntimeError, ValueError, TypeError):
                 notes.append("pdf_ocr_failed")
         else:
