@@ -26,7 +26,8 @@ resume state, and can upload completed batches to a team's Builders folder.
 cd /mnt/c/Projects/Buildathon_Mechina_CAD
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[ocr]'
+python -m pip install -r requirements.lock
+python -m pip install --no-deps -e .
 ```
 
 OCR requires the system Tesseract executable. The Python OCR package alone is
