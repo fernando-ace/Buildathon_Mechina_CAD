@@ -68,7 +68,7 @@ class IdentityLedger:
             self._alias_map[normalized] = pseudonym
         self._pending_db_aliases: dict[tuple[str, str], str] = {}
         self._pending_aliases: dict[str, str] = {}
-        self._pending_pattern: re.Pattern[str] | None = None
+        self._pending_automaton = None
         self._alias_automaton = None
         self._alias_pattern: re.Pattern[str] | None = None
         self._full_pattern_dirty = True
@@ -107,7 +107,7 @@ class IdentityLedger:
                 if ahocorasick is None or not is_new_value:
                     return
                 self._pending_aliases[normalized] = pseudonym
-                self._pending_pattern = None
+                self._pending_automaton = None
                 if len(self._pending_aliases) >= _ALIAS_BATCH_SIZE:
                     self._compile_aliases()
 
@@ -132,7 +132,7 @@ class IdentityLedger:
         if ahocorasick is None:
             self._alias_automaton = None
             self._pending_aliases.clear()
-            self._pending_pattern = None
+            self._pending_automaton = None
             return
         automaton = ahocorasick.Automaton()
         added = False
@@ -146,7 +146,7 @@ class IdentityLedger:
         else:
             self._alias_automaton = None
         self._pending_aliases.clear()
-        self._pending_pattern = None
+        self._pending_automaton = None
         self._alias_pattern = None
         self._full_pattern_dirty = True
 
@@ -167,10 +167,18 @@ class IdentityLedger:
             self._full_pattern_dirty = False
         return self._alias_pattern
 
-    def _pending_alias_pattern(self) -> re.Pattern[str] | None:
-        if self._pending_pattern is None and self._pending_aliases:
-            self._pending_pattern = self._compile_pattern(self._pending_aliases)
-        return self._pending_pattern
+    def _pending_alias_automaton(self):
+        if self._pending_automaton is None and self._pending_aliases and ahocorasick is not None:
+            automaton = ahocorasick.Automaton()
+            added = False
+            for value, pseudonym in self._pending_aliases.items():
+                if len(value) >= 3:
+                    automaton.add_word(value, (value, pseudonym))
+                    added = True
+            if added:
+                automaton.make_automaton()
+                self._pending_automaton = automaton
+        return self._pending_automaton
 
     def replace_known_aliases(self, text: str) -> str:
         if not text or not self._alias_map:
@@ -204,15 +212,14 @@ class IdentityLedger:
             matches.append((start, end, pseudonym))
 
         if self._alias_automaton is not None:
-            for end_index, (alias, pseudonym) in self._alias_automaton.iter(folded):
+            for end_index, (alias, fallback) in self._alias_automaton.iter(folded):
                 start = end_index - len(alias) + 1
-                add_match(start, end_index + 1, pseudonym)
-        pending = self._pending_alias_pattern()
+                add_match(start, end_index + 1, self._alias_map.get(alias, fallback))
+        pending = self._pending_alias_automaton()
         if pending is not None:
-            for match in pending.finditer(text):
-                pseudonym = self._alias_map.get(match.group(0).casefold())
-                if pseudonym is not None:
-                    add_match(match.start(), match.end(), pseudonym)
+            for end_index, (alias, fallback) in pending.iter(folded):
+                start = end_index - len(alias) + 1
+                add_match(start, end_index + 1, self._alias_map.get(alias, fallback))
         if not matches:
             return text
 
