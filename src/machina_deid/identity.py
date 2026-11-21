@@ -7,8 +7,11 @@ import hmac
 import os
 import re
 import sqlite3
+import sys
 import unicodedata
+from bisect import bisect_right
 from collections.abc import Mapping
+from functools import lru_cache
 from itertools import groupby
 from pathlib import Path
 
@@ -18,6 +21,16 @@ except ImportError:  # pragma: no cover - exercised only by dependency-light ins
     ahocorasick = None
 
 _ALIAS_BATCH_SIZE = 512
+
+
+@lru_cache(maxsize=1)
+def _casefold_expansion_pattern() -> re.Pattern[str]:
+    expanding = [
+        chr(codepoint)
+        for codepoint in range(sys.maxunicode + 1)
+        if len(chr(codepoint).casefold()) != 1
+    ]
+    return re.compile("[" + "".join(re.escape(char) for char in expanding) + "]")
 
 _LABELS = {
     "person": "Person",
@@ -202,18 +215,37 @@ class IdentityLedger:
             )
 
         folded = text.casefold()
+        expansion_starts: list[int] = []
+        expansion_ends: list[int] = []
+        expansion_original_starts: list[int] = []
+        expansion_deltas: list[int] = []
         if len(folded) != len(text):
-            # Full case folding can expand a small set of Unicode characters. Keep the
-            # existing regex semantics for those rare strings so match offsets stay exact.
-            pattern = self._full_alias_pattern()
-            return (
-                pattern.sub(
-                    lambda match: self._alias_map.get(match.group(0).casefold(), match.group(0)),
-                    text,
-                )
-                if pattern
-                else text
-            )
+            delta = 0
+            for match in _casefold_expansion_pattern().finditer(text):
+                fold_start = match.start() + delta
+                fold_length = len(match.group(0).casefold())
+                fold_end = fold_start + fold_length
+                expansion_starts.append(fold_start)
+                expansion_ends.append(fold_end)
+                expansion_original_starts.append(match.start())
+                delta += fold_length - 1
+                expansion_deltas.append(delta)
+
+        def original_start(position: int) -> int | None:
+            index = bisect_right(expansion_starts, position) - 1
+            if index >= 0 and position < expansion_ends[index]:
+                return expansion_original_starts[index] if position == expansion_starts[index] else None
+            completed = bisect_right(expansion_ends, position)
+            delta = expansion_deltas[completed - 1] if completed else 0
+            return position - delta
+
+        def original_end(position: int) -> int | None:
+            index = bisect_right(expansion_starts, position) - 1
+            if index >= 0 and expansion_starts[index] < position < expansion_ends[index]:
+                return None
+            completed = bisect_right(expansion_ends, position)
+            delta = expansion_deltas[completed - 1] if completed else 0
+            return position - delta
 
         # Python's regex engine slows down as the alias alternation grows. The Aho-Corasick
         # automaton scans large CAD XML and text payloads in one pass. Newly discovered aliases
@@ -261,8 +293,11 @@ class IdentityLedger:
         events = heapq.merge(*iterators)
         for end_index, same_end in groupby(events, key=lambda item: item[0]):
             for _, (alias, fallback) in same_end:
-                start = end_index - len(alias) + 1
-                add_match(start, end_index + 1, self._alias_map.get(alias, fallback))
+                fold_start = end_index - len(alias) + 1
+                start = original_start(fold_start)
+                end = original_end(end_index + 1)
+                if start is not None and end is not None:
+                    add_match(start, end, self._alias_map.get(alias, fallback))
             flush_through(end_index - self._max_alias_length + 1)
         flush_through(None)
         if not output:
