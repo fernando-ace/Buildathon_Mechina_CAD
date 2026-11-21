@@ -697,14 +697,17 @@ def _process_pdf(
         notes.append("pdf_large_document_ocr_reduced_dpi")
     for page in doc:
         textpage = None
-        if tesseract_available:
+        native_text = page.get_text("text")
+        has_images = bool(page.get_images(full=True))
+        needs_ocr = has_images or len(native_text.strip()) < 80
+        if tesseract_available and needs_ocr:
             try:
                 textpage = page.get_textpage_ocr(
                     flags=0, language="eng", dpi=ocr_dpi, full=False
                 )
             except (OSError, RuntimeError, ValueError, TypeError):
                 notes.append("pdf_ocr_failed")
-        else:
+        elif not tesseract_available and needs_ocr:
             notes.append("pdf_scanned_text_not_ocr_scanned")
         try:
             content = (
