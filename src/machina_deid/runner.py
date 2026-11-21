@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from .formats import HandlerContext, process_file
 from .identity import IdentityLedger, TextRedactor
-from .input_source import INPUT_BASE, download_entry, download_manifest
+from .input_source import INPUT_BASE, InputNotFound, download_entry, download_manifest
 from .manifest import iter_manifest
 from .models import ManifestEntry
 from .paths import PathMapper
@@ -274,6 +274,12 @@ def run_pipeline(
                 input_digest = download_entry(
                     INPUT_BASE, entry.url_path, local_input, entry.size, entry.md5
                 )
+            except InputNotFound:
+                detail = "The complete official mirror returned HTTP 404 for this manifest-listed file."
+                state.record_issue(attempt, output_path, "source_missing", detail)
+                state.record(attempt, source_path, output_path, "omitted", notes=["source_missing"])
+                failed += 1
+                continue
             except (OSError, RuntimeError, ValueError) as exc:
                 state.record_issue(attempt, output_path, "input_unavailable", type(exc).__name__)
                 state.record(

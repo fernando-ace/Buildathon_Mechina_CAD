@@ -8,6 +8,10 @@ from pathlib import Path
 INPUT_BASE = "https://machina-input.joinbuilders.org"
 
 
+class InputNotFound(RuntimeError):
+    """The manifest lists a file that the complete input mirror cannot serve."""
+
+
 def download_manifest(destination: Path, base_url: str = INPUT_BASE) -> Path:
     """Fetch the official manifest with curl, matching the track's own script."""
 
@@ -67,6 +71,8 @@ def download_entry(
             "--retry-connrefused",
             "--retry-delay",
             "2",
+            "-w",
+            "\n%{http_code}",
             "-o",
             str(temporary),
             url,
@@ -77,6 +83,9 @@ def download_entry(
     )
     if completed.returncode:
         temporary.unlink(missing_ok=True)
+        status = completed.stdout.strip().splitlines()[-1:] or [""]
+        if status[0] == "404":
+            raise InputNotFound("The official input mirror returned HTTP 404.")
         raise RuntimeError("Input download failed: " + completed.stderr[-400:])
     if not temporary.is_file() or temporary.stat().st_size != expected_size:
         actual = temporary.stat().st_size if temporary.exists() else -1
