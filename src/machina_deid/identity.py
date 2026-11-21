@@ -58,10 +58,15 @@ class IdentityLedger:
             "PRIMARY KEY(kind, normalized))"
         )
         self.db.commit()
-        self._alias_map = {
-            str(normalized): str(pseudonym)
-            for normalized, pseudonym in self.db.execute("SELECT normalized,pseudonym FROM aliases")
-        }
+        self._alias_map: dict[str, str] = {}
+        self._stored_aliases: set[tuple[str, str]] = set()
+        for kind, normalized, pseudonym in self.db.execute(
+            "SELECT kind,normalized,pseudonym FROM aliases"
+        ):
+            kind, normalized, pseudonym = str(kind), str(normalized), str(pseudonym)
+            self._stored_aliases.add((kind, normalized))
+            self._alias_map[normalized] = pseudonym
+        self._pending_db_aliases: dict[tuple[str, str], str] = {}
         self._pending_aliases: dict[str, str] = {}
         self._pending_pattern: re.Pattern[str] | None = None
         self._alias_automaton = None
@@ -92,20 +97,36 @@ class IdentityLedger:
     def add_alias(self, kind: str, value: str, pseudonym: str) -> None:
         normalized = normalize(value)
         if normalized:
-            cursor = self.db.execute(
-                "INSERT OR IGNORE INTO aliases(kind, normalized, pseudonym) VALUES (?, ?, ?)",
-                (kind, normalized, pseudonym),
-            )
-            self.db.commit()
-            if cursor.rowcount:
+            alias_key = (kind, normalized)
+            if alias_key not in self._stored_aliases:
+                self._pending_db_aliases[alias_key] = pseudonym
+            if alias_key not in self._stored_aliases:
+                is_new_value = normalized not in self._alias_map
                 self._alias_map[normalized] = pseudonym
                 self._full_pattern_dirty = True
-                if ahocorasick is None:
+                if ahocorasick is None or not is_new_value:
                     return
                 self._pending_aliases[normalized] = pseudonym
                 self._pending_pattern = None
                 if len(self._pending_aliases) >= _ALIAS_BATCH_SIZE:
                     self._compile_aliases()
+
+    def flush_aliases(self) -> None:
+        """Persist aliases in one short transaction after processing a source file."""
+        if not self._pending_db_aliases:
+            return
+        rows = [
+            (kind, normalized, pseudonym)
+            for (kind, normalized), pseudonym in self._pending_db_aliases.items()
+        ]
+        self.db.executemany(
+            "INSERT OR IGNORE INTO aliases(kind, normalized, pseudonym) VALUES (?, ?, ?)", rows
+        )
+        self.db.commit()
+        self._stored_aliases.update(
+            (kind, normalized) for kind, normalized, _ in rows
+        )
+        self._pending_db_aliases.clear()
 
     def _compile_aliases(self) -> None:
         if ahocorasick is None:
@@ -189,7 +210,7 @@ class IdentityLedger:
         pending = self._pending_alias_pattern()
         if pending is not None:
             for match in pending.finditer(text):
-                pseudonym = self._pending_aliases.get(match.group(0).casefold())
+                pseudonym = self._alias_map.get(match.group(0).casefold())
                 if pseudonym is not None:
                     add_match(match.start(), match.end(), pseudonym)
         if not matches:
@@ -215,6 +236,7 @@ class IdentityLedger:
         ]
 
     def close(self) -> None:
+        self.flush_aliases()
         self.db.commit()
 
 

@@ -291,7 +291,12 @@ def run_pipeline(
                 failed += 1
                 continue
             scratch_bytes += entry.size - prior_input_size
-            result = process_file(local_input, local_output, context, logical_name=entry.path.name)
+            try:
+                result = process_file(
+                    local_input, local_output, context, logical_name=entry.path.name
+                )
+            finally:
+                ledger.flush_aliases()
             local_input.unlink(missing_ok=True)
             scratch_bytes -= entry.size
             if result.status == "omitted":
