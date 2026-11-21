@@ -171,9 +171,12 @@ def _process_text(
         except UnicodeDecodeError:
             encoding = "cp1252"
     text = data.decode(encoding, errors="replace")
-    if PurePosixPath(logical_name).suffix.lower() in {".step", ".stp", ".p21"}:
+    suffix = PurePosixPath(logical_name).suffix.lower()
+    if suffix in {".step", ".stp", ".p21"}:
         text = _redact_step(text, context, references)
-    if PurePosixPath(logical_name).suffix.lower() in {".xml", ".rels"}:
+        text = context.reference_rewrite(text, references)
+        return text.encode(encoding, errors="replace")
+    if suffix in {".xml", ".rels"}:
         text = _redact_xml(text, context, references)
     text = context.redactor.redact(text)
     text = context.reference_rewrite(text, references)
@@ -397,7 +400,7 @@ def _process_zip(data: bytes, context: HandlerContext) -> tuple[bytes, list[str]
                     raise UnsafeArchive("archive_member_limit")
                 raw = zin.read(info)
                 processed, member_notes = _process_bytes(raw, info.filename, context, references)
-                if processed is None or "unprocessed_binary" in member_notes:
+                if processed is None:
                     raise UnsafeArchive("archive_contains_unprocessed_member")
                 notes.extend(member_notes)
                 zout.writestr(new_info, processed)
@@ -440,7 +443,7 @@ def _process_tar(data: bytes, name: str, context: HandlerContext) -> tuple[bytes
                         raise UnsafeArchive("archive_member_unreadable")
                     raw = extracted.read()
                     processed, member_notes = _process_bytes(raw, member.name, context, references)
-                    if processed is None or "unprocessed_binary" in member_notes:
+                    if processed is None:
                         raise UnsafeArchive("archive_contains_unprocessed_member")
                     notes.extend(member_notes)
                     tout.addfile(out_info, io.BytesIO(processed))
@@ -715,6 +718,12 @@ def _process_bytes(
             return _process_pdf(data, context, references)
         if ext in IMAGE_EXTENSIONS:
             return _process_image(data, context)
+        if ext == ".stl":
+            binary_header = _binary_stl_header(data)
+            if binary_header is not None:
+                header, notes = _redact_binary_stl_header(binary_header, context)
+                return header + data[80:], notes
+            return _redact_ascii_stl(data, context), []
         if ext in TEXT_EXTENSIONS:
             return _process_text(data, context, references, name), []
         if data.startswith(b"\x1f\x8b") or ext in {".gz", ".tgz"}:
@@ -750,6 +759,73 @@ def _process_bytes(
         return None, [str(exc)]
 
 
+def _is_archive_name(name: str) -> bool:
+    return (
+        name.lower().endswith((".tar", ".tar.gz", ".tgz"))
+        or PurePosixPath(name).suffix.lower() in ARCHIVE_EXTENSIONS
+    )
+
+
+def _binary_stl_header(data: bytes) -> bytes | None:
+    if len(data) < 84:
+        return None
+    triangle_count = struct.unpack_from("<I", data, 80)[0]
+    return data[:80] if len(data) == 84 + triangle_count * 50 else None
+
+
+def _redact_binary_stl_header(header: bytes, context: HandlerContext) -> tuple[bytes, list[str]]:
+    if b"COLOR=" in header:
+        return header, ["binary_stl_color_header_preserved"]
+    text = header.decode("ascii", errors="ignore").strip("\x00 \t\r\n")
+    if len(text) < 4 or not re.search(r"[A-Za-z]{3}", text):
+        return header, ["binary_stl_header_not_readable"]
+    pseudonym = context.ledger.pseudonym("part", text).encode("ascii")
+    return pseudonym[:80].ljust(80, b"\x00"), []
+
+
+_ASCII_STL_NAME = re.compile(rb"(?i)^(solid|endsolid)([ \t]+)([^\r\n]*)(\r?\n)?$")
+
+
+def _redact_ascii_stl(data: bytes, context: HandlerContext) -> bytes:
+    """Change ASCII STL name lines while leaving every facet and coordinate byte intact."""
+
+    output = bytearray()
+    for line in io.BytesIO(data):
+        match = _ASCII_STL_NAME.match(line)
+        if match and match.group(3).strip():
+            original = match.group(3).decode("utf-8", errors="replace").strip()
+            replacement = context.ledger.pseudonym("part", original).encode("ascii")
+            output.extend(match.group(1) + match.group(2) + replacement + (match.group(4) or b""))
+        else:
+            output.extend(line)
+    return bytes(output)
+
+
+def _process_stl_file(source: Path, destination: Path, context: HandlerContext) -> list[str]:
+    size = source.stat().st_size
+    with source.open("rb") as reader:
+        prefix = reader.read(84)
+        triangle_count = struct.unpack_from("<I", prefix, 80)[0] if len(prefix) == 84 else -1
+        if triangle_count >= 0 and size == 84 + triangle_count * 50:
+            header, notes = _redact_binary_stl_header(prefix[:80], context)
+            reader.seek(80)
+            with destination.open("wb") as writer:
+                writer.write(header)
+                shutil.copyfileobj(reader, writer, length=1024 * 1024)
+            return notes
+
+        reader.seek(0)
+        with destination.open("wb") as writer:
+            for line in reader:
+                match = _ASCII_STL_NAME.match(line)
+                if match and match.group(3).strip():
+                    original = match.group(3).decode("utf-8", errors="replace").strip()
+                    replacement = context.ledger.pseudonym("part", original).encode("ascii")
+                    line = match.group(1) + match.group(2) + replacement + (match.group(4) or b"")
+                writer.write(line)
+    return []
+
+
 def _text_encoding(prefix: bytes) -> tuple[str, bytes]:
     if prefix.startswith(codecs.BOM_UTF16_LE):
         return "utf-16-le", codecs.BOM_UTF16_LE
@@ -769,6 +845,7 @@ def _transform_text_chunk(
 ) -> str:
     if PurePosixPath(logical_name).suffix.lower() in {".step", ".stp", ".p21"}:
         text = _redact_step(text, context, references)
+        return context.reference_rewrite(text, references)
     return context.reference_rewrite(context.redactor.redact(text), references)
 
 
@@ -829,7 +906,11 @@ def process_file(
     try:
         logical_name = logical_name or source.name
         size = source.stat().st_size
-        if size > MAX_TEXT_BYTES and PurePosixPath(logical_name).suffix.lower() in TEXT_EXTENSIONS:
+        if PurePosixPath(logical_name).suffix.lower() == ".stl":
+            notes = _process_stl_file(source, temporary, context)
+        elif (
+            size > MAX_TEXT_BYTES and PurePosixPath(logical_name).suffix.lower() in TEXT_EXTENSIONS
+        ):
             notes = _stream_text_file(source, temporary, logical_name, context)
         elif size > MAX_TEXT_BYTES:
             if PurePosixPath(logical_name).suffix.lower() in ARCHIVE_EXTENSIONS:
@@ -849,7 +930,7 @@ def process_file(
         temporary.unlink(missing_ok=True)
         # Do not copy an unreadable archive into corpus: nested originals would
         # remain available without any processed copy.
-        if PurePosixPath(logical_name or source.name).suffix.lower() in ARCHIVE_EXTENSIONS:
+        if _is_archive_name(logical_name or source.name):
             return finish("omitted", ["archive_processing_failed_" + type(exc).__name__])
         try:
             shutil.copyfile(source, destination)

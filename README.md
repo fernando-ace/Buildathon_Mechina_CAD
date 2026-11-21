@@ -15,10 +15,10 @@ resume state, and can upload completed batches to a team's Builders folder.
   recorded as an omission instead of silently overflowing the working disk.
 - The Builders folder is private. The pipeline does not configure AWS, make a
   bucket public, submit an attempt, or send a message to organizers.
-- Unsupported binary CAD formats are copied intact and listed as exceptions;
-  that preserves usability but does not satisfy de-identification checks for
-  identifying data inside those files. Unsupported members make an archive an
-  explicit omission rather than leaving a raw nested copy in the output archive.
+- Unsupported binary CAD formats are retained intact and listed as exceptions;
+  this preserves usability but does not satisfy checks for identifying data
+  inside those files. Unsupported archive members are retained and reported
+  while archive paths and supported members are still processed.
 
 ## Setup (Ubuntu / WSL2)
 
@@ -33,6 +33,9 @@ python -m pip install --no-deps -e .
 OCR requires the system Tesseract executable. The Python OCR package alone is
 not enough. If Tesseract is unavailable, image text is not claimed to be
 redacted; the affected files are recorded in the exceptions report.
+
+On Ubuntu / WSL2, install OCR support with `sudo apt-get install tesseract-ocr`
+and install the optional Python package with `python -m pip install -e .[ocr]`.
 
 ## Commands
 

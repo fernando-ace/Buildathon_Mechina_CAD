@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sqlite3
+import struct
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -12,6 +13,7 @@ from machina_deid.formats import (
     _process_bytes,
     _strip_jpeg_metadata,
     _strip_png_metadata,
+    process_file,
 )
 from machina_deid.identity import IdentityLedger, TextRedactor
 from machina_deid.manifest import ManifestError, iter_manifest
@@ -112,19 +114,21 @@ def test_step_replaces_identity_strings_without_touching_geometry(tmp_path: Path
         "FILE_NAME('jane.step','2026-11-20T12:00:00',('Jane Doe'),('ACME Inc'),'', '', '');\n"
         "ENDSEC;\nDATA;\n"
         "#1=PRODUCT('P-17','ACME gearbox','',(#2));\n"
-        "#2=CARTESIAN_POINT('',(123.45,10.00,5.00));\nENDSEC;\nEND-ISO-10303-21;"
+        "#2=CARTESIAN_POINT('',(123.45,10.00,5.00));\n"
+        "#3=CARTESIAN_POINT('',(614,555,1212));\nENDSEC;\nEND-ISO-10303-21;"
     )
     result, _notes = _process_bytes(source.encode(), "model.step", context)
     assert result is not None
     cleaned = result.decode()
     assert "Jane Doe" not in cleaned and "ACME Inc" not in cleaned and "ACME gearbox" not in cleaned
     assert "123.45,10.00,5.00" in cleaned
+    assert "614,555,1212" in cleaned
     assert "PRODUCT(" in cleaned and "CARTESIAN_POINT" in cleaned
     ledger.close()
     db.close()
 
 
-def test_zip_names_and_text_are_cleaned_and_nested_binary_is_omitted(tmp_path: Path) -> None:
+def test_zip_keeps_unsupported_binary_members_and_reports_them(tmp_path: Path) -> None:
     entry = ManifestEntry(PurePosixPath("archives/source.zip"), 1, None, "x", 2)
     db, ledger, context = context_for(tmp_path, [entry])
     zipped = io.BytesIO()
@@ -140,9 +144,52 @@ def test_zip_names_and_text_are_cleaned_and_nested_binary_is_omitted(tmp_path: P
     unsafe = io.BytesIO()
     with zipfile.ZipFile(unsafe, "w") as archive:
         archive.writestr("native.sldprt", b"\x00opaque")
-    omitted, unsafe_notes = _process_bytes(unsafe.getvalue(), "unsafe.zip", context)
-    assert omitted is None
-    assert "archive_contains_unprocessed_member" in unsafe_notes
+    kept, unsafe_notes = _process_bytes(unsafe.getvalue(), "unsafe.zip", context)
+    assert kept is not None
+    assert "unprocessed_binary" in unsafe_notes
+    with zipfile.ZipFile(io.BytesIO(kept)) as archive:
+        [native_name] = archive.namelist()
+        assert native_name.endswith(".sldprt")
+        assert archive.read(native_name) == b"\x00opaque"
+    ledger.close()
+    db.close()
+
+
+def test_malformed_tar_gz_is_omitted_instead_of_copied_raw(tmp_path: Path) -> None:
+    entry = ManifestEntry(PurePosixPath("archives/source.tar.gz"), 1, None, "x", 2)
+    db, ledger, context = context_for(tmp_path, [entry])
+    source = tmp_path / "broken.tar.gz"
+    destination = tmp_path / "output.tar.gz"
+    source.write_bytes(b"not a tar archive")
+    result = process_file(source, destination, context, logical_name="source.tar.gz")
+    assert result.status == "omitted"
+    assert not destination.exists()
+    ledger.close()
+    db.close()
+
+
+def test_binary_stl_redacts_header_without_changing_triangles(tmp_path: Path) -> None:
+    entry = ManifestEntry(PurePosixPath("parts/Jane Doe.stl"), 1, None, "x", 2)
+    db, ledger, context = context_for(tmp_path, [entry])
+    triangle = struct.pack("<12fH", *([1.25, 2.5, 3.75] * 4), 0)
+    source = b"Jane Doe".ljust(80, b"\x00") + struct.pack("<I", 1) + triangle
+    cleaned, notes = _process_bytes(source, "Jane Doe.stl", context)
+    assert cleaned is not None and not notes
+    assert b"Jane Doe" not in cleaned[:80]
+    assert cleaned[80:] == source[80:]
+    ledger.close()
+    db.close()
+
+
+def test_ascii_stl_redacts_only_solid_name_lines(tmp_path: Path) -> None:
+    entry = ManifestEntry(PurePosixPath("parts/Jane Doe.stl"), 1, None, "x", 2)
+    db, ledger, context = context_for(tmp_path, [entry])
+    geometry = b"  vertex 123.45 10.0 5.0\r\n"
+    source = b"solid Jane Doe\r\n" + geometry + b"endsolid Jane Doe\r\n"
+    cleaned, notes = _process_bytes(source, "Jane Doe.stl", context)
+    assert cleaned is not None and not notes
+    assert b"Jane Doe" not in cleaned
+    assert geometry in cleaned
     ledger.close()
     db.close()
 

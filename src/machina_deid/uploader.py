@@ -99,7 +99,9 @@ class BuildersUploader:
                 body = response.read()
                 if 200 <= response.status < 300:
                     return local_path.stat().st_size
-                if response.status in (401, 403) and b"xpired" in body.lower():
+                if response.status == 401 or (
+                    response.status in (400, 403) and b"xpired" in body.lower()
+                ):
                     self.tokens.renew(token)
                     continue
                 if response.status >= 500 or response.status == 429:
