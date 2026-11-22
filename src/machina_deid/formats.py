@@ -205,7 +205,7 @@ def _process_text(
         text = _redact_step(text, context, references)
         text = _rewrite_step_references(text, context, references)
         return text.encode(encoding, errors="replace")
-    if suffix in {".xml", ".rels"}:
+    if suffix in {".xml", ".rels", ".svg"}:
         note_count = len(context.notes)
         text = _redact_xml(text, context, references)
         if len(context.notes) == note_count:
@@ -323,6 +323,10 @@ def _redact_xml(text: str, context: HandlerContext, references: ReferenceMap | N
     except ET.ParseError:
         context.notes.append("xml_parse_failed")
         return text
+    is_svg = isinstance(root.tag, str) and root.tag.rsplit("}", 1)[-1].casefold() == "svg"
+    geometry_attributes = (
+        {"path": {"d"}, "polygon": {"points"}, "polyline": {"points"}} if is_svg else {}
+    )
     for node in root.iter():
         if not isinstance(node.tag, str):
             continue
@@ -336,6 +340,8 @@ def _redact_xml(text: str, context: HandlerContext, references: ReferenceMap | N
         if identity and node.text:
             node.text = _xml_identity_value(node.text, identity[1], context)
         for key, value in list(node.attrib.items()):
+            if key.casefold() in geometry_attributes.get(parent_name, set()):
+                continue
             attribute = _xml_kind(key)
             if key.casefold() == "name" and parent_name == "metadata":
                 continue
