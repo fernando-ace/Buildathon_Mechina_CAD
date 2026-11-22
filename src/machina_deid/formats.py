@@ -99,6 +99,10 @@ MODEL_METADATA = re.compile(
     rb"(?is)(?P<open><metadata\b[^>]*>)(?P<value>.*?)(?P<close></metadata\s*>)"
 )
 MODEL_METADATA_NAME = re.compile(rb"(?is)\bname\s*=\s*(['\"])(.*?)\1")
+GENERATED_IDENTITY = re.compile(
+    r"(?:Person|Company|Account|Domain|Contact|Address|Project|Part|File|Archive)-[A-Z2-7]{16}",
+    re.IGNORECASE,
+)
 
 
 class UnsafeArchive(ValueError):
@@ -186,6 +190,23 @@ def _pseudo_member_name(name: str, context: HandlerContext) -> str:
     )
     mapped.append(new_stem + suffix)
     return PurePosixPath(*mapped).as_posix()
+
+
+def _pseudonymize_metadata(value: str, kind: str, context: HandlerContext) -> str:
+    """Pseudonymize identity-bearing PDF metadata without exposing labels to alias rewriting."""
+
+    core = value.strip()
+    if (
+        not core
+        or core.casefold() in {"unknown", "none", "n/a", "not applicable", "-"}
+        or GENERATED_IDENTITY.fullmatch(core)
+    ):
+        return value
+    pseudonym = context.ledger.pseudonym(kind, core)
+    context.ledger.add_alias(kind, core, pseudonym)
+    prefix = value[: len(value) - len(value.lstrip())]
+    suffix = value[len(value.rstrip()) :]
+    return prefix + pseudonym + suffix
 
 
 def _process_text(
@@ -681,9 +702,9 @@ def _process_pdf(
         if value:
             value = str(value)
             if key == "author":
-                value = context.redactor.redact("Author: " + value).split(":", 1)[1].strip()
+                value = _pseudonymize_metadata(value, "person", context)
             elif key in {"title", "subject", "keywords"}:
-                value = context.redactor.redact("Project: " + value).split(":", 1)[1].strip()
+                value = _pseudonymize_metadata(value, "project", context)
             else:
                 value = context.redactor.redact(value)
             metadata[key] = context.reference_rewrite(value, references)
